@@ -1,0 +1,2052 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NeuralDeep Music</title>
+<!-- ============================================================================
+  NeuralDeep Music — один HTML-файл. Полный порт десктопного клиента
+  (Python + pywebview/WebView2 + PyInstaller) на чистую браузерную страницу.
+
+  Архитектура оригинала сохранена модуль-в-модуль (см. комментарий в <script>):
+
+    main.py               -> эта страница (точка входа)
+    app/paths.py          -> не нужен: %APPDATA% заменён на localStorage
+    app/settings_store.py -> SettingsStore   (settings.json -> localStorage)
+    app/api_client.py     -> ApiClient       (requests -> fetch + транспорт)
+    app/js_api.py         -> Bridge          (мост pywebview.api.* -> объект)
+    ui/index.html         -> разметка ниже
+    ui/style.css          -> <style> ниже
+    ui/app.js             -> секция UI в <script>
+
+  Единственное новое звено — «транспорт»: API neuraldeep не отдаёт CORS-заголовки.
+  Основной обход — кнопка «Скачать лаунчер (.bat)»: страница генерирует bat-файл,
+  который открывает приложение в Chrome/Edge с флагом --disable-web-security
+  (изолированный профиль, запросы напрямую в API). Запасной путь — CORS-прокси
+  (шаблон с {url}; рецепт своего Cloudflare Worker — там же). Проверено: Chrome
+  с этим флагом ходит в api.neuraldeep.ru напрямую. Firefox флаг не поддерживает.
+  API-ключ хранится только в localStorage браузера.
+============================================================================ -->
+<style>
+:root {
+  --bg: #0e1420;
+  --bg-soft: #131b2b;
+  --card: #172135;
+  --card-2: #1c2840;
+  --line: #263349;
+  --text: #e8eefc;
+  --muted: #8fa0bd;
+  --accent: #6d8dff;
+  --accent-2: #38d0b5;
+  --danger: #ff6b81;
+  --warn: #ffc153;
+  --ok: #45d483;
+  --radius: 14px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: radial-gradient(1200px 600px at 80% -10%, #1b2a4a 0%, var(--bg) 55%);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* ---------- topbar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(14, 20, 32, 0.8);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand { display: flex; align-items: center; gap: 12px; min-width: 220px; }
+.brand-mark {
+  width: 40px; height: 40px; border-radius: 12px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #0b1220; font-size: 22px; font-weight: 700;
+}
+.brand-title { font-size: 16px; font-weight: 650; letter-spacing: 0.2px; }
+.brand-sub { font-size: 12px; color: var(--muted); }
+
+.quota { display: flex; gap: 10px; flex: 1; flex-wrap: wrap; }
+.quota-pill {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 14px; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line);
+  min-width: 120px;
+}
+.quota-pill.subtle { opacity: 0.85; }
+.quota-cap { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+.quota-val { font-size: 14px; font-weight: 600; }
+.quota-val.low { color: var(--warn); }
+.quota-val.empty { color: var(--danger); }
+
+.topbar-actions { display: flex; gap: 8px; }
+
+/* ---------- layout ---------- */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 480px) 1fr;
+  gap: 18px;
+  padding: 18px 22px 32px;
+  align-items: start;
+}
+.col { display: flex; flex-direction: column; gap: 18px; }
+
+.card {
+  background: linear-gradient(180deg, var(--card) 0%, var(--card-2) 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px 18px;
+  box-shadow: var(--shadow);
+}
+.card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 12px;
+}
+.card-head h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: 0.2px; }
+
+/* ---------- form ---------- */
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.field > span { font-size: 12px; color: var(--muted); letter-spacing: 0.3px; }
+.field > span b { color: var(--text); }
+.field small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.field em { font-style: normal; opacity: 0.75; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+input[type="text"], input[type="password"], select, textarea {
+  width: 100%;
+  background: var(--bg-soft);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 11px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+textarea { resize: vertical; line-height: 1.45; font-family: inherit; }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(109, 141, 255, 0.18);
+}
+input[readonly] { opacity: 0.75; }
+
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+.check {
+  display: flex; gap: 9px; align-items: flex-start;
+  font-size: 12.5px; color: var(--muted);
+  margin: 6px 0 12px;
+  cursor: pointer;
+}
+.check input { margin-top: 2px; accent-color: var(--accent); }
+
+.btn {
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.08s, background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn:hover { border-color: var(--accent); background: #20304e; }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.primary {
+  background: linear-gradient(135deg, var(--accent), #5576f0);
+  border-color: transparent;
+  color: #fff;
+}
+.btn.primary:hover { filter: brightness(1.07); }
+.btn.ghost { background: transparent; }
+.btn.big { width: 100%; padding: 13px 16px; font-size: 14px; margin-top: 6px; }
+.btn-row { display: flex; gap: 8px; margin: 4px 0 8px; }
+.btn-row.tight { gap: 6px; }
+
+.badge {
+  font-size: 11px; padding: 4px 10px; border-radius: 999px;
+  background: var(--bg-soft); color: var(--muted); border: 1px solid var(--line);
+}
+.badge.ok { color: var(--ok); border-color: rgba(69, 212, 131, 0.4); }
+.badge.err { color: var(--danger); border-color: rgba(255, 107, 129, 0.4); }
+
+.sample-block, .file-block, .advanced, .transport-block {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin: 8px 0 12px;
+  background: rgba(19, 27, 43, 0.5);
+}
+.advanced summary, .transport-block summary {
+  cursor: pointer; color: var(--muted); font-size: 12.5px;
+  user-select: none; margin-bottom: 8px;
+}
+.advanced[open] summary, .transport-block[open] summary { color: var(--text); }
+.hint { color: var(--muted); font-size: 11.5px; margin: 10px 2px 0; line-height: 1.5; }
+
+.warn-note {
+  border: 1px solid rgba(255, 193, 83, 0.45);
+  background: rgba(255, 193, 83, 0.08);
+  color: var(--warn);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0 10px;
+}
+
+pre.code {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow: auto;
+  max-height: 240px;
+  white-space: pre;
+  margin: 8px 0;
+}
+ol.steps { margin: 6px 0 8px; padding-left: 20px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+ol.steps b { color: var(--text); }
+
+/* ---------- status ---------- */
+.progress {
+  height: 8px; border-radius: 999px; background: var(--bg-soft);
+  overflow: hidden; margin-bottom: 10px;
+}
+.progress-bar {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.4s ease;
+}
+.status-line { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+#statusText { font-size: 13px; color: var(--muted); line-height: 1.5; }
+.elapsed {
+  font-variant-numeric: tabular-nums;
+  font-size: 18px; font-weight: 650; color: var(--text); white-space: nowrap;
+}
+.task-id {
+  margin-top: 8px; font-size: 11px; color: var(--muted);
+  word-break: break-all;
+}
+.status-chip {
+  font-size: 11px; font-weight: 650; letter-spacing: 0.4px;
+  padding: 5px 11px; border-radius: 999px; text-transform: uppercase;
+}
+.status-chip.idle { background: var(--bg-soft); color: var(--muted); }
+.status-chip.run { background: rgba(109, 141, 255, 0.18); color: var(--accent); }
+.status-chip.ok { background: rgba(69, 212, 131, 0.16); color: var(--ok); }
+.status-chip.err { background: rgba(255, 107, 129, 0.16); color: var(--danger); }
+
+/* ---------- tracks ---------- */
+.tracks { display: flex; flex-direction: column; gap: 12px; }
+.empty {
+  color: var(--muted); font-size: 12.5px;
+  padding: 18px; text-align: center;
+  border: 1px dashed var(--line); border-radius: 12px;
+}
+.track {
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; background: var(--bg-soft);
+}
+.track-head {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; margin-bottom: 8px;
+}
+.track-title { font-size: 13px; font-weight: 650; }
+.track-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.chip {
+  font-size: 11px; color: var(--muted);
+  background: var(--card); border: 1px solid var(--line);
+  padding: 3px 9px; border-radius: 999px;
+}
+.chip b { color: var(--text); font-weight: 600; }
+audio { width: 100%; height: 38px; margin: 6px 0; }
+.track-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.track-text {
+  margin-top: 8px; font-size: 11.5px; color: var(--muted);
+  white-space: pre-wrap; line-height: 1.5;
+  max-height: 120px; overflow: auto;
+  background: var(--bg); border-radius: 8px; padding: 8px 10px;
+}
+
+/* ---------- log ---------- */
+.log {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11.5px; line-height: 1.55;
+  background: var(--bg-soft); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px;
+  min-height: 120px; max-height: 260px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+.log .ts { color: #5d6f92; }
+.log .ok { color: var(--ok); }
+.log .err { color: var(--danger); }
+.log .warn { color: var(--warn); }
+
+/* ---------- scrollbars ---------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2b3a55; border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">♪</span>
+    <div>
+      <div class="brand-title">NeuralDeep Music</div>
+      <div class="brand-sub" id="baseLabel">api.neuraldeep.ru</div>
+    </div>
+  </div>
+
+  <div class="quota" id="quotaBox">
+    <div class="quota-pill" id="quotaDay">
+      <span class="quota-cap">День</span>
+      <span class="quota-val">—</span>
+    </div>
+    <div class="quota-pill" id="quotaMonth">
+      <span class="quota-cap">Месяц</span>
+      <span class="quota-val">—</span>
+    </div>
+    <div class="quota-pill subtle" id="queuePill" hidden>
+      <span class="quota-cap">Очередь</span>
+      <span class="quota-val">—</span>
+    </div>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="btn ghost" id="btnRefreshQuota" title="Обновить квоту">Квота</button>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- ================= ЛЕВАЯ КОЛОНКА ================= -->
+  <section class="col">
+    <div class="card">
+      <div class="card-head">
+        <h2>Подключение</h2>
+        <span class="badge" id="connBadge">не проверено</span>
+      </div>
+
+      <label class="field">
+        <span>API base URL</span>
+        <div class="row">
+          <select id="baseHost">
+            <option value="neuraldeep.ru">neuraldeep.ru</option>
+            <option value="neuraldeep.tech">neuraldeep.tech</option>
+            <option value="custom">Свой адрес…</option>
+          </select>
+          <input id="baseUrl" type="text" spellcheck="false"
+                 placeholder="https://api.neuraldeep.ru/v1" />
+        </div>
+        <small>Можно указать домен или полный адрес: neuraldeep.ru → https://api.neuraldeep.ru/v1</small>
+      </label>
+
+      <label class="field">
+        <span>API-ключ <em>(sk-…)</em></span>
+        <div class="row">
+          <input id="apiKey" type="password" spellcheck="false"
+                 placeholder="sk-..." autocomplete="off" />
+          <button class="btn ghost" id="btnToggleKey" type="button" title="Показать/скрыть">👁</button>
+        </div>
+        <small>Ключ из кабинета → <b>Ключи</b>. Хранится локально в этом браузере (localStorage) и никуда не отправляется, кроме API neuraldeep (или вашего прокси)</small>
+      </label>
+
+      <div class="btn-row">
+        <button class="btn" id="btnSaveConn">Сохранить</button>
+        <button class="btn primary" id="btnCheckConn">Проверить ключ</button>
+      </div>
+
+      <div class="warn-note" id="corsNote" hidden>
+        Браузер заблокировал прямой запрос к API (CORS): сервер neuraldeep не отдаёт
+        CORS-заголовки, а Firefox и обычные окна Chrome/Edge такие запросы запрещают.
+        <b>Обход без прокси:</b> скачайте лаунчер кнопкой ниже и запустите — он откроет
+        приложение в изолированном окне Chrome (или Edge) с отключённой проверкой CORS.
+        Запросы пойдут напрямую в API, ключ — только между браузером и neuraldeep.
+      </div>
+
+      <details class="transport-block" id="transportBlock">
+        <summary>Транспорт запросов <em>(обход CORS: лаунчер или прокси)</em></summary>
+
+        <div class="btn-row">
+          <button class="btn primary" id="btnDownloadLauncher" type="button">Скачать лаунчер (.bat)</button>
+          <button class="btn ghost" id="btnCopyLauncher" type="button" title="Скопированный текст Windows не блокирует — сохраните его в Блокноте как .bat">Скопировать текст лаунчера</button>
+        </div>
+        <small class="hint" style="margin:0 0 10px">
+          Лаунчер — маленький .bat, который генерирует эта страница. Держите его <b>в той же папке,
+          что и neuraldeep-music.html</b> (путь относительный). Двойной клик: открывается
+          <b>отдельное окно Chrome/Edge</b> с временным профилем и флагом
+          <b>--disable-web-security</b> — CORS обходится, прокси не нужен.
+          Работает в Chrome (проверено) и Edge; Firefox отключать CORS не умеет.
+          Если Windows заблокировал скачанный .bat («These files can't be opened»): правый клик
+          по файлу → <b>Свойства</b> → <b>✓ Разблокировать</b> → ОК. Или кнопкой
+          «Скопировать текст лаунчера»: вставьте текст в Блокнот и сохраните как .bat —
+          такой файл не блокируется. В окне лаунчера не открывайте посторонние сайты.
+        </small>
+
+        <label class="field">
+          <span>Режим</span>
+          <select id="transport">
+            <option value="auto">Авто — напрямую, при CORS-блокировке через прокси</option>
+            <option value="direct">Напрямую (без прокси)</option>
+            <option value="proxy">Всегда через прокси</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Адрес CORS-прокси <em>(запасной способ, шаблон с <b>{url}</b>)</em></span>
+          <input id="proxyUrl" type="text" spellcheck="false"
+                 placeholder="https://my-proxy.ваш-аккаунт.workers.dev/?url={url}" />
+          <small>Если не хочется использовать лаунчер — разверните свой прокси (рецепт ниже) и
+            укажите его здесь. Используйте только свой прокси: публичные требуют регистрацию
+            или режут заголовки — ключ утечёт.</small>
+        </label>
+
+        <details class="advanced">
+          <summary>Свой прокси за 2 минуты — Cloudflare Worker (бесплатно)</summary>
+          <ol class="steps">
+            <li>Откройте <b>https://workers.cloudflare.com</b> → Create Worker → Deploy.</li>
+            <li>«Edit code» → замените содержимое на код ниже → Deploy.</li>
+            <li>Скопируйте адрес воркера вида <b>https://xxx.yyy.workers.dev</b>.</li>
+            <li>Вставьте в поле выше: <b>https://xxx.yyy.workers.dev/?url={url}</b>.</li>
+            <li>Нажмите «Проверить ключ» — в шапке появится квота.</li>
+          </ol>
+          <button class="btn ghost" id="btnCopyWorker" type="button">Скопировать код воркера</button>
+          <pre class="code" id="workerCode">export default {
+  async fetch(request) {
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Headers': request.headers.get('Access-Control-Request-Headers') || '*',
+      'Access-Control-Expose-Headers': 'Content-Disposition,Retry-After',
+      'Access-Control-Max-Age': '86400',
+    };
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    const target = new URL(request.url).searchParams.get('url');
+    if (!target) return new Response('?url= required', { status: 400, headers: cors });
+    const init = { method: request.method, headers: request.headers, redirect: 'follow' };
+    if (!['GET', 'HEAD'].includes(request.method)) { init.body = request.body; init.duplex = 'half'; }
+    const upstream = await fetch(target, init);
+    const headers = new Headers(upstream.headers);
+    for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+    return new Response(upstream.body, { status: upstream.status, headers });
+  },
+};</pre>
+        </details>
+      </details>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Трек</h2>
+        <div class="btn-row tight">
+          <button class="btn ghost" id="btnSample" title="Бесплатный черновик по одной фразе">Черновик</button>
+          <button class="btn ghost" id="btnFormat" title="Модель допишет описание и текст (бесплатно)">Дописать</button>
+        </div>
+      </div>
+
+      <label class="field">
+        <span>Описание стиля <em>(prompt)</em></span>
+        <textarea id="prompt" rows="3"
+          placeholder="мрачный синтвейв, аналоговые синты, женский вокал"></textarea>
+        <small>Жанр, инструменты, настроение, тип вокала</small>
+      </label>
+
+      <label class="field">
+        <span>Текст песни <em>(lyrics)</em></span>
+        <textarea id="lyrics" rows="5"
+          placeholder="[verse]&#10;Первая строчка&#10;[chorus]&#10;Припев&#10;&#10;Или просто [instrumental] для трека без голоса"></textarea>
+        <small>Разметка: [verse] · [chorus] · [bridge] · [instrumental]</small>
+      </label>
+
+      <div class="grid2">
+        <label class="field">
+          <span>Язык вокала</span>
+          <select id="vocalLanguage">
+            <option value="ru">ru — русский</option>
+            <option value="en">en — english</option>
+            <option value="auto">auto</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Формат файла</span>
+          <select id="audioFormat">
+            <option value="mp3">mp3</option>
+            <option value="flac">flac</option>
+            <option value="wav">wav</option>
+            <option value="opus">opus</option>
+            <option value="aac">aac</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="field">
+        <span>Длительность: <b id="durationVal">120</b> с <small>(10–300)</small></span>
+        <input id="audioDuration" type="range" min="10" max="300" step="5" value="120" />
+      </label>
+
+      <div class="grid2">
+        <label class="field">
+          <span>Вариантов</span>
+          <select id="batchSize">
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>task_type</span>
+          <select id="taskType">
+            <option value="text2music">text2music — с нуля</option>
+            <option value="cover">cover — кавер src_audio</option>
+            <option value="repaint">repaint — кусок заново</option>
+            <option value="lego">lego — добавить дорожку</option>
+            <option value="extract">extract — вытащить дорожку</option>
+            <option value="complete">complete — продолжить</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="thinking" checked />
+        <span>thinking — модель сначала продумывает структуру (звучит лучше)</span>
+      </label>
+
+      <div class="sample-block">
+        <label class="field">
+          <span>Фраза для черновика <em>(sample_query)</em></span>
+          <input id="sampleQuery" type="text"
+                 placeholder="песня про кота, который ненавидит понедельники" />
+        </label>
+        <label class="check">
+          <input type="checkbox" id="sampleMode" />
+          <span>режим черновика: модель сама придумает стиль и текст</span>
+        </label>
+      </div>
+
+      <div id="fileBlock" class="file-block" hidden>
+        <div class="grid2">
+          <div class="field">
+            <span>src_audio <small>(нужен для cover/repaint/lego/extract/complete)</small></span>
+            <div class="row">
+              <input id="srcAudioName" type="text" readonly placeholder="файл не выбран" />
+              <button class="btn ghost" id="btnPickSrc" type="button">Обзор…</button>
+              <button class="btn ghost" id="btnClearSrc" type="button" title="Убрать файл">×</button>
+            </div>
+          </div>
+          <div class="field">
+            <span>reference_audio <small>(референс звучания)</small></span>
+            <div class="row">
+              <input id="refAudioName" type="text" readonly placeholder="файл не выбран" />
+              <button class="btn ghost" id="btnPickRef" type="button">Обзор…</button>
+              <button class="btn ghost" id="btnClearRef" type="button" title="Убрать файл">×</button>
+            </div>
+          </div>
+        </div>
+        <small class="hint">Файлы до 25 МБ суммарно. После перезагрузки страницы файлы нужно выбрать заново — браузер не хранит их между сессиями.</small>
+        <input type="file" id="srcFileInput" accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.wma,audio/*" hidden />
+        <input type="file" id="refFileInput" accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.wma,audio/*" hidden />
+      </div>
+
+      <details class="advanced">
+        <summary>Тонкая настройка</summary>
+        <div class="grid3">
+          <label class="field"><span>seed</span><input id="seed" type="text" placeholder="случайный" /></label>
+          <label class="field"><span>bpm</span><input id="bpm" type="text" placeholder="—" /></label>
+          <label class="field"><span>key_scale</span><input id="keyScale" type="text" placeholder="—" /></label>
+          <label class="field"><span>time_signature</span><input id="timeSignature" type="text" placeholder="4/4" /></label>
+          <label class="field"><span>inference_steps ≤20</span><input id="inferenceSteps" type="text" value="8" /></label>
+          <label class="field"><span>guidance_scale</span><input id="guidanceScale" type="text" placeholder="—" /></label>
+          <label class="field"><span>shift</span><input id="shift" type="text" placeholder="—" /></label>
+          <label class="field"><span>lm_temperature</span><input id="lmTemperature" type="text" placeholder="—" /></label>
+          <label class="field"><span>lm_top_p</span><input id="lmTopP" type="text" placeholder="—" /></label>
+          <label class="field"><span>lm_top_k</span><input id="lmTopK" type="text" placeholder="—" /></label>
+          <label class="field"><span>audio_cover_strength</span><input id="audioCoverStrength" type="text" placeholder="—" /></label>
+          <label class="field"><span>repainting_start, с</span><input id="repaintingStart" type="text" placeholder="—" /></label>
+          <label class="field"><span>repainting_end, с</span><input id="repaintingEnd" type="text" placeholder="—" /></label>
+        </div>
+        <label class="field">
+          <span>lm_negative_prompt</span>
+          <input id="lmNegativePrompt" type="text" placeholder="чего избегать" />
+        </label>
+      </details>
+
+      <button class="btn primary big" id="btnGenerate">Сгенерировать трек</button>
+      <p class="hint" id="costHint">Списание — только за готовые треки. Упавшая задача возвращает квоту.</p>
+    </div>
+  </section>
+
+  <!-- ================= ПРАВАЯ КОЛОНКА ================= -->
+  <section class="col">
+    <div class="card">
+      <div class="card-head">
+        <h2>Статус</h2>
+        <div class="status-chip idle" id="statusChip">ожидание</div>
+      </div>
+      <div class="progress">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <div class="status-line">
+        <div id="statusText">Заполните ключ и описание, затем «Сгенерировать».</div>
+        <div class="elapsed" id="elapsed">00:00</div>
+      </div>
+      <div class="task-id" id="taskIdLine" hidden></div>
+    </div>
+
+    <div class="card" id="tracksCard">
+      <div class="card-head">
+        <h2>Готовые треки</h2>
+        <button class="btn ghost" id="btnSaveAll" hidden>Сохранить все</button>
+      </div>
+      <div id="tracks" class="tracks">
+        <div class="empty" id="tracksEmpty">Здесь появится плеер и кнопка сохранения.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Журнал</h2>
+        <button class="btn ghost" id="btnClearLog">Очистить</button>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* =====================================================================
+ * NeuralDeep Music — вся логика в одном файле. Соответствие модулям
+ * десктопного клиента (Python + pywebview) отмечено в заголовках секций.
+ * Контракты сохранены: Bridge.* возвращает {ok: true, ...} или
+ * {ok: false, error, status?, cancelled?} и не бросает исключений наружу.
+ * ===================================================================== */
+
+/* =====================================================================
+ * app/settings_store.py -> SettingsStore
+ * settings.json в %APPDATA% заменён на localStorage браузера.
+ * ===================================================================== */
+
+const SettingsStore = {
+  KEY: 'nd_music_settings',
+
+  DEFAULT_SETTINGS: {
+    // подключение
+    base_host: 'neuraldeep.ru',
+    base_url: 'https://api.neuraldeep.ru/v1',
+    api_key: '',
+    // транспорт (новое звено взамен Python-бэкенда, см. ApiClient)
+    transport: 'auto',        // 'auto' | 'direct' | 'proxy'
+    proxy_url: '',
+    // генерация
+    prompt: '',
+    lyrics: '',
+    vocal_language: 'ru',
+    audio_duration: 120,
+    bpm: null,
+    key_scale: '',
+    time_signature: '',
+    audio_format: 'mp3',
+    batch_size: 1,
+    thinking: true,
+    seed: null,
+    task_type: 'text2music',
+    audio_cover_strength: null,
+    repainting_start: null,
+    repainting_end: null,
+    // черновик / доработка
+    sample_mode: false,
+    sample_query: '',
+    sample_instrumental: false,
+    sample_random: false,
+    // тонкая настройка
+    inference_steps: 8,
+    guidance_scale: null,
+    shift: null,
+    lm_temperature: null,
+    lm_top_p: null,
+    lm_top_k: null,
+    lm_negative_prompt: '',
+    // файлы (в браузере File-объекты живут в state, здесь — только имена для отображения)
+    src_audio: '',
+    reference_audio: '',
+  },
+
+  // поля, которые уходят в POST /music/generate
+  GENERATE_FIELDS: [
+    'prompt', 'lyrics', 'vocal_language', 'audio_duration', 'bpm', 'key_scale',
+    'time_signature', 'audio_format', 'batch_size', 'thinking', 'seed', 'task_type',
+    'audio_cover_strength', 'repainting_start', 'repainting_end', 'sample_mode',
+    'sample_query', 'inference_steps', 'guidance_scale', 'shift', 'lm_temperature',
+    'lm_top_p', 'lm_top_k', 'lm_negative_prompt',
+  ],
+
+  load() {
+    let data = {};
+    try {
+      const raw = localStorage.getItem(this.KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') data = parsed;
+      }
+    } catch (e) { data = {}; }
+    const merged = { ...this.DEFAULT_SETTINGS };
+    for (const k of Object.keys(this.DEFAULT_SETTINGS)) {
+      if (k in data) merged[k] = data[k];
+    }
+    return merged;
+  },
+
+  save(partial) {
+    const current = this.load();
+    for (const key of Object.keys(partial || {})) {
+      if (key in this.DEFAULT_SETTINGS) current[key] = partial[key];
+    }
+    localStorage.setItem(this.KEY, JSON.stringify(current));
+    return current;
+  },
+
+  generatePayload(settings) {
+    const out = {};
+    for (const k of this.GENERATE_FIELDS) if (k in settings) out[k] = settings[k];
+    return out;
+  },
+};
+
+/* =====================================================================
+ * app/api_client.py -> ApiClient
+ * HTTP-клиент Music API. requests -> fetch.
+ * Нормализация base URL, ошибок и квоты — дословный перенос.
+ * Новое: транспорт direct/proxy (CORS), таймаут через AbortController.
+ * ===================================================================== */
+
+const DEFAULT_TIMEOUT_MS = 120000;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // до 25 МБ на src_audio + reference_audio вместе
+
+const AUDIO_FORMATS = ['mp3', 'flac', 'opus', 'aac', 'wav'];
+const TASK_TYPES = ['text2music', 'cover', 'repaint', 'lego', 'extract', 'complete'];
+const DONE_STATUSES = ['succeeded', 'failed', 'completed', 'error', 'cancelled'];
+
+const MIME_BY_EXT = {
+  mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac',
+  opus: 'audio/ogg', aac: 'audio/aac', m4a: 'audio/mp4',
+};
+
+class ApiError extends Error {
+  constructor(message, status = null, kind = null) {
+    super(message);
+    this.message = message;
+    this.status = status;
+    this.kind = kind; // 'cors' | 'network' | 'timeout' | null
+  }
+}
+
+// прямой запрос упирался в CORS/сеть — до смены транспорта не пытаемся снова
+let DIRECT_FAILED = false;
+function resetDirectFailure() { DIRECT_FAILED = false; }
+
+function normalizeBaseUrl(value) {
+  let v = String(value || '').trim().replace(/\/+$/, '');
+  if (!v) throw new ApiError('Не задан API base URL');
+
+  if (!v.includes('://')) {
+    const host = v.toLowerCase();
+    v = host.startsWith('api.') ? 'https://' + host : 'https://api.' + host;
+  }
+
+  const withoutFragment = v.split('#', 1)[0].split('?', 1)[0];
+  if (!withoutFragment.endsWith('/v1')) {
+    if (withoutFragment.endsWith('.ru') || withoutFragment.endsWith('.tech') || withoutFragment.endsWith('/')) {
+      v = v.replace(/\/+$/, '') + '/v1';
+    }
+    // уже какой-то путь — считаем, что пользователь указал базу сам
+  }
+  return v.replace(/\/+$/, '');
+}
+
+function errorFromBody(status, text) {
+  let body = null;
+  try { body = JSON.parse(text); } catch (e) { /* не JSON */ }
+
+  if (body && typeof body === 'object') {
+    const err = body.error;
+    if (err && typeof err === 'object') {
+      const msg = err.message || err.type || err.code;
+      if (msg) {
+        const extra = [];
+        for (const key of ['pool', 'scope', 'used', 'limit', 'reset_at']) {
+          if (key in err) extra.push(`${key}=${err[key]}`);
+        }
+        return String(msg) + (extra.length ? ` (${extra.join(', ')})` : '');
+      }
+      return String(err);
+    }
+    if (typeof err === 'string' && err) return err;
+    if (body.detail) return String(body.detail);
+    if (body.task_id === undefined && body.message) return String(body.message);
+  }
+  return (text || '').trim() || `HTTP ${status}`;
+}
+
+function normalizeQuota(data) {
+  const result = { raw: data };
+  if (!data || typeof data !== 'object') return result;
+
+  // сервисный блок: {"music": {"day": ..., "month": ...}}, иначе "quota", иначе сам ответ
+  let container = null;
+  for (const value of Object.values(data)) {
+    if (value && typeof value === 'object' && value.day && typeof value.day === 'object') {
+      container = value; break;
+    }
+  }
+  if (container === null && data.quota && typeof data.quota === 'object') container = data.quota;
+  if (container === null) container = data;
+
+  for (const key of ['tier', 'wallet', 'unit', 'is_admin']) {
+    if (key in data) result[key] = data[key];
+    else if (key in container) result[key] = container[key];
+  }
+
+  for (const scope of ['day', 'month']) {
+    const block = container[scope];
+    if (block && typeof block === 'object') {
+      result[scope] = {
+        used: block.used ?? null, limit: block.limit ?? null,
+        remaining: block.remaining ?? null, reset_at: block.reset_at ?? null,
+      };
+    } else if (typeof block === 'number') {
+      result[scope] = { remaining: block, used: null, limit: null, reset_at: null };
+    }
+  }
+
+  if (!('day' in result) && !('month' in result)) {
+    const flat = {};
+    for (const key of ['used', 'limit', 'remaining', 'reset_at']) {
+      if (key in container) flat[key] = container[key];
+    }
+    if (Object.keys(flat).length) result.day = flat;
+  }
+  return result;
+}
+
+function cleanParams(params) {
+  const out = {};
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string') {
+      const v = value.trim();
+      if (!v) continue;
+      out[key] = v;
+      continue;
+    }
+    if ((Array.isArray(value) || typeof value === 'object') && !Object.keys(value).length) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function toFormValue(value) {
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return String(value);
+}
+
+class MusicClient {
+  constructor(baseUrl, apiKey, opts = {}) {
+    this.base_url = normalizeBaseUrl(baseUrl);
+    this.api_key = String(apiKey || '').trim();
+    this.timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
+    this.proxyTemplate = String(opts.proxyUrl || '').trim();
+    this.forceProxy = opts.forceProxy === true;
+    this.headers = {
+      'Authorization': `Bearer ${this.api_key}`,
+      'Accept': 'application/json',
+      'Accept-Language': 'ru',
+    };
+  }
+
+  _url(path) {
+    return this.base_url.replace(/\/+$/, '') + '/' + String(path).replace(/^\/+/, '');
+  }
+
+  _proxied(target) {
+    const t = this.proxyTemplate;
+    if (!t) throw new ApiError('Не задан адрес CORS-прокси. Откройте «Транспорт запросов» и укажите адрес (или режим «Напрямую»).');
+    if (t.includes('{url}')) return t.replace('{url}', encodeURIComponent(target));
+    if (/[?&](url|q|quest)=$/.test(t)) return t + encodeURIComponent(target);
+    return t.replace(/\/+$/, '') + '/' + target;
+  }
+
+  async _fetch(timeoutMs, url, init) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs || this.timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // аналог _send: транспорт direct/proxy с обработкой CORS и таймаутов.
+  // Заголовки сессии (Authorization и пр.) мержатся в каждый запрос —
+  // как это делал requests.Session в десктопном клиенте.
+  async _send(method, path, init = {}) {
+    const url = this._url(path);
+    const mergedInit = { ...init, headers: { ...this.headers, ...(init.headers || {}) } };
+    const useProxy = this.forceProxy || (DIRECT_FAILED && !!this.proxyTemplate);
+
+    if (!useProxy) {
+      try {
+        return await this._fetch(this.timeoutMs, url, mergedInit);
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          throw new ApiError(`Таймаут запроса (${Math.round(this.timeoutMs / 1000)} с)`, 0, 'timeout');
+        }
+        if (e instanceof TypeError) {
+          // fetch бросает TypeError при CORS-блокировке и при отсутствии сети
+          DIRECT_FAILED = true;
+          if (this.proxyTemplate) {
+            return await this._fetch(this.timeoutMs, this._proxied(url), mergedInit);
+          }
+          throw new ApiError(
+            'Браузер заблокировал запрос к API (CORS или нет сети). ' +
+            'Сервер neuraldeep не отдаёт CORS-заголовки — настройте прокси в блоке «Транспорт запросов».',
+            0, 'cors');
+        }
+        throw new ApiError('Сетевая ошибка: ' + e.message, 0, 'network');
+      }
+    }
+    return await this._fetch(this.timeoutMs, this._proxied(url), mergedInit);
+  }
+
+  _raiseForStatus(status, text) {
+    if (status >= 400) {
+      let hint = '';
+      if (status === 409) hint = ' (трек ещё не готов)';
+      else if (status === 401) hint = ' (неверный или отозванный API-ключ)';
+      else if (status === 402) hint = ' (на кошельке недостаточно средств)';
+      else if (status === 429) hint = ' (квота или лимит частоты)';
+      throw new ApiError(errorFromBody(status, text) + hint, status);
+    }
+  }
+
+  async _json(method, path, init = {}) {
+    const resp = await this._send(method, path, init);
+    const text = await resp.text();
+    this._raiseForStatus(resp.status, text);
+    if (!text) return {};
+    try {
+      const data = JSON.parse(text);
+      return (data && typeof data === 'object' && !Array.isArray(data)) ? data : { data };
+    } catch (e) {
+      throw new ApiError('Сервер вернул не JSON: ' + text.slice(0, 200));
+    }
+  }
+
+  // --- ручки API ------------------------------------------------------
+
+  quota() { return this._json('GET', '/music/quota').then(normalizeQuota); }
+  queue() { return this._json('GET', '/music/queue'); }
+  task(taskId) { return this._json('GET', `/music/tasks/${encodeURIComponent(taskId)}`); }
+
+  async generate(params, srcFile = null, refFile = null) {
+    const payload = cleanParams(params);
+    if (!(payload.prompt || payload.lyrics || payload.sample_query)) {
+      throw new ApiError('Пустой запрос: заполните описание (prompt), текст или фразу для черновика', 400);
+    }
+    if (payload.sample_mode && !payload.sample_query) {
+      throw new ApiError('В режиме черновика нужно поле sample_query (одна фраза)', 400);
+    }
+
+    const files = [];
+    for (const [field, file] of [['src_audio', srcFile], ['reference_audio', refFile]]) {
+      if (!file) continue;
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new ApiError('Файлы больше 25 МБ (суммарно по src_audio и reference_audio)', 413);
+      }
+      files.push([field, file]);
+    }
+    const total = files.reduce((sum, [, f]) => sum + f.size, 0);
+    if (total > MAX_UPLOAD_BYTES) {
+      throw new ApiError('Файлы больше 25 МБ (суммарно по src_audio и reference_audio)', 413);
+    }
+
+    if (files.length) {
+      const form = new FormData();
+      for (const [k, v] of Object.entries(payload)) form.append(k, toFormValue(v));
+      for (const [field, file] of files) {
+        form.append(field, file, file.name || field);
+      }
+      return this._json('POST', '/music/generate', { method: 'POST', headers: this.headers, body: form });
+    }
+    return this._json('POST', '/music/generate', {
+      method: 'POST',
+      headers: { ...this.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async downloadTrack(taskId, index = 0) {
+    const path = `/music/tasks/${encodeURIComponent(taskId)}/result?index=${encodeURIComponent(index)}`;
+    const resp = await this._send('GET', path, { method: 'GET', headers: this.headers });
+    const text = resp.status >= 400 ? await resp.text() : '';
+    this._raiseForStatus(resp.status, text);
+    const mime = String(resp.headers.get('Content-Type') || 'audio/mpeg').split(';')[0].trim();
+    let filename = '';
+    const disposition = resp.headers.get('Content-Disposition') || '';
+    if (disposition.includes('filename=')) {
+      filename = disposition.split('filename=')[1].trim().replace(/^"|"$/g, '');
+    }
+    const blob = await resp.blob();
+    return { blob, mime, filename };
+  }
+
+  async sample(query, instrumental = false, vocalLanguage = null, random = false) {
+    const payload = { query };
+    if (instrumental) payload.instrumental = true;
+    if (vocalLanguage) payload.vocal_language = vocalLanguage;
+    if (random) payload.random = true;
+    return this._json('POST', '/music/sample', {
+      method: 'POST',
+      headers: { ...this.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async formatPrompt(prompt = null, lyrics = null) {
+    const payload = {};
+    if (prompt) payload.prompt = prompt;
+    if (lyrics) payload.lyrics = lyrics;
+    if (!Object.keys(payload).length) {
+      throw new ApiError('Для доработки нужно заполнить описание или текст', 400);
+    }
+    return this._json('POST', '/music/format', {
+      method: 'POST',
+      headers: { ...this.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+}
+
+/* =====================================================================
+ * app/js_api.py -> Bridge
+ * Мост для UI (вместо pywebview.api.*). Те же методы, та же форма
+ * ответов {ok: true, ...} / {ok: false, error, status?, cancelled?}.
+ * Диалоги файлов заменены на <input type="file"> (см. UI), запись на диск —
+ * на скачивание через <a download>.
+ * ===================================================================== */
+
+const Bridge = {
+  _trackCache: new Map(), // `${task_id}:${index}` -> {blob, url, mime, ext, size}
+
+  _client(settings) {
+    const cfg = settings || SettingsStore.load();
+    const apiKey = String(cfg.api_key || '').trim();
+    if (!apiKey) {
+      throw new ApiError('Не задан API-ключ. Откройте «Подключение» и введите ключ (sk-...).', 401);
+    }
+    return new MusicClient(cfg.base_url || '', apiKey, {
+      proxyUrl: cfg.proxy_url,
+      forceProxy: cfg.transport === 'proxy',
+    });
+  },
+
+  // имена методов — как в app/js_api.py (pywebview.api.*)
+  async get_settings() {
+    return { ok: true, settings: SettingsStore.load(), defaults: SettingsStore.DEFAULT_SETTINGS };
+  },
+
+  async save_settings(settings) {
+    try {
+      const saved = SettingsStore.save(settings || {});
+      return { ok: true, settings: saved };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async check_connection() {
+    try {
+      const client = this._client();
+      const quota = await client.quota();
+      let queue = null;
+      try { queue = await client.queue(); } catch (e) { /* очередь необязательна */ }
+      return { ok: true, quota, queue, base_url: client.base_url };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status, kind: e.kind };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async get_quota() { return this.check_connection(); },
+
+  async generate(params) {
+    try {
+      const settings = SettingsStore.save(params || {});
+      const client = this._client(settings);
+      const payload = SettingsStore.generatePayload(settings);
+      const result = await client.generate(
+        payload,
+        state.trackFiles.src_audio || null,
+        state.trackFiles.reference_audio || null,
+      );
+      const taskId = result.task_id || result.id;
+      return {
+        ok: true,
+        task_id: taskId,
+        status: result.status,
+        poll: result.poll,
+        base_url: client.base_url,
+      };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status, kind: e.kind };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async get_task(taskId) {
+    try {
+      const client = this._client();
+      const task = await client.task(taskId);
+      return { ok: true, task };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status, kind: e.kind };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async get_track(taskId, index = 0) {
+    try {
+      const key = `${String(taskId)}:${Number(index)}`;
+      let cached = this._trackCache.get(key);
+      if (!cached) {
+        const client = this._client();
+        const { blob, mime } = await client.downloadTrack(String(taskId), Number(index));
+        const ext = extForMime(mime);
+        cached = { blob, mime, ext, size: blob.size, url: URL.createObjectURL(blob) };
+        this._trackCache.set(key, cached);
+      }
+      return { ok: true, index: Number(index), mime: cached.mime, ext: cached.ext, size: cached.size, url: cached.url };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status, kind: e.kind };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async save_track(taskId, index = 0, filename = null) {
+    try {
+      const key = `${String(taskId)}:${Number(index)}`;
+      let cached = this._trackCache.get(key);
+      if (!cached) {
+        const got = await this.get_track(taskId, index);
+        if (!got.ok) return got;
+        cached = this._trackCache.get(key);
+      }
+      let suggested = filename || `neuraldeep_${stamp()}_${Number(index)}.${cached.ext}`;
+      if (!/\.[a-z0-9]+$/i.test(suggested)) suggested += `.${cached.ext}`;
+
+      const a = document.createElement('a');
+      a.href = cached.url;
+      a.download = suggested;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return { ok: true, path: suggested, size: cached.size };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async sample_draft(params) {
+    try {
+      const p = params || {};
+      const client = this._client();
+      const result = await client.sample(
+        p.query || '',
+        !!p.instrumental,
+        p.vocal_language || null,
+        !!p.random,
+      );
+      return { ok: true, result };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status, kind: e.kind };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  async format_draft(params) {
+    try {
+      const p = params || {};
+      const client = this._client();
+      const result = await client.formatPrompt(p.prompt || null, p.lyrics || null);
+      return { ok: true, result };
+    } catch (e) {
+      if (e instanceof ApiError) return { ok: false, error: e.message, status: e.status, kind: e.kind };
+      return { ok: false, error: String(e) };
+    }
+  },
+
+  clearTrackCache() {
+    for (const { url } of this._trackCache.values()) URL.revokeObjectURL(url);
+    this._trackCache.clear();
+  },
+};
+
+function extForMime(mime) {
+  mime = String(mime || '').split(';')[0].trim().toLowerCase();
+  for (const [ext, known] of Object.entries(MIME_BY_EXT)) {
+    if (known === mime) return ext;
+  }
+  if (mime.endsWith('/mp3') || mime === 'audio/mpeg') return 'mp3';
+  const fmt = String(SettingsStore.load().audio_format || 'mp3').toLowerCase();
+  return AUDIO_FORMATS.includes(fmt) ? fmt : 'mp3';
+}
+
+function stamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/* =====================================================================
+ * ui/app.js -> UI
+ * Логика фронтенда: опрос задачи, плееры, журнал. Вызовы идут через
+ * Bridge (раньше — pywebview.api.*), форма ответов не изменилась.
+ * ===================================================================== */
+
+const state = {
+  taskId: null,
+  pollTimer: null,
+  clockTimer: null,
+  startedAt: 0,
+  tracks: [],
+  busy: false,
+  trackFiles: { src_audio: null, reference_audio: null }, // File-объекты (в браузере)
+};
+
+const $ = (id) => document.getElementById(id);
+
+const call = (name, ...args) => Bridge[name](...args);
+
+/* ---------------- утилиты ---------------- */
+
+function log(message, kind = 'info') {
+  const box = $('log');
+  const ts = new Date().toLocaleTimeString('ru-RU');
+  const line = document.createElement('div');
+  line.innerHTML = `<span class="ts">[${ts}]</span> <span class="${kind}"></span>`;
+  line.querySelector(`.${kind}`).textContent = message;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setStatus(text, mode = 'idle') {
+  $('statusText').textContent = text;
+  const chip = $('statusChip');
+  chip.className = `status-chip ${mode}`;
+  chip.textContent =
+    mode === 'run' ? 'в работе' :
+    mode === 'ok' ? 'готово' :
+    mode === 'err' ? 'ошибка' : 'ожидание';
+}
+
+function setProgress(pct) {
+  $('progressBar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+
+function fmtDuration(totalSeconds) {
+  const s = Number(totalSeconds) || 0;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return `${String(m).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+}
+
+function numOrNull(value) {
+  if (value === null || value === undefined) return null;
+  const t = String(value).trim().replace(',', '.');
+  if (t === '') return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+function suggestName(index, ext) {
+  return `neuraldeep_${stamp()}_${index}.${ext || 'mp3'}`;
+}
+
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/* ---------------- настройки / подключение ---------------- */
+
+function collectParams() {
+  return {
+    base_host: $('baseHost').value,
+    base_url: $('baseUrl').value.trim(),
+    api_key: $('apiKey').value.trim(),
+    transport: $('transport').value,
+    proxy_url: $('proxyUrl').value.trim(),
+    prompt: $('prompt').value,
+    lyrics: $('lyrics').value,
+    vocal_language: $('vocalLanguage').value,
+    audio_duration: Number($('audioDuration').value),
+    bpm: numOrNull($('bpm').value),
+    key_scale: $('keyScale').value.trim(),
+    time_signature: $('timeSignature').value.trim(),
+    audio_format: $('audioFormat').value,
+    batch_size: Number($('batchSize').value),
+    thinking: $('thinking').checked,
+    seed: numOrNull($('seed').value),
+    task_type: $('taskType').value,
+    audio_cover_strength: numOrNull($('audioCoverStrength').value),
+    repainting_start: numOrNull($('repaintingStart').value),
+    repainting_end: numOrNull($('repaintingEnd').value),
+    sample_mode: $('sampleMode').checked,
+    sample_query: $('sampleQuery').value.trim(),
+    inference_steps: numOrNull($('inferenceSteps').value),
+    guidance_scale: numOrNull($('guidanceScale').value),
+    shift: numOrNull($('shift').value),
+    lm_temperature: numOrNull($('lmTemperature').value),
+    lm_top_p: numOrNull($('lmTopP').value),
+    lm_top_k: numOrNull($('lmTopK').value),
+    lm_negative_prompt: $('lmNegativePrompt').value.trim(),
+  };
+}
+
+function applySettings(s) {
+  if (!s) return;
+  $('baseHost').value = s.base_host || 'neuraldeep.ru';
+  $('baseUrl').value = s.base_url || '';
+  $('apiKey').value = s.api_key || '';
+  $('transport').value = s.transport || 'auto';
+  $('proxyUrl').value = s.proxy_url || '';
+  $('prompt').value = s.prompt || '';
+  $('lyrics').value = s.lyrics || '';
+  $('vocalLanguage').value = s.vocal_language || 'ru';
+  $('audioDuration').value = s.audio_duration || 120;
+  $('durationVal').textContent = $('audioDuration').value;
+  $('bpm').value = s.bpm ?? '';
+  $('keyScale').value = s.key_scale || '';
+  $('timeSignature').value = s.time_signature || '';
+  $('audioFormat').value = s.audio_format || 'mp3';
+  $('batchSize').value = String(s.batch_size || 1);
+  $('thinking').checked = !!s.thinking;
+  $('seed').value = s.seed ?? '';
+  $('taskType').value = s.task_type || 'text2music';
+  $('audioCoverStrength').value = s.audio_cover_strength ?? '';
+  $('repaintingStart').value = s.repainting_start ?? '';
+  $('repaintingEnd').value = s.repainting_end ?? '';
+  $('sampleMode').checked = !!s.sample_mode;
+  $('sampleQuery').value = s.sample_query || '';
+  $('inferenceSteps').value = s.inference_steps ?? '8';
+  $('guidanceScale').value = s.guidance_scale ?? '';
+  $('shift').value = s.shift ?? '';
+  $('lmTemperature').value = s.lm_temperature ?? '';
+  $('lmTopP').value = s.lm_top_p ?? '';
+  $('lmTopK').value = s.lm_top_k ?? '';
+  $('lmNegativePrompt').value = s.lm_negative_prompt || '';
+  syncTaskTypeUi();
+  updateBaseLabel();
+}
+
+function updateBaseLabel() {
+  const v = $('baseUrl').value.trim() || '—';
+  $('baseLabel').textContent = v.replace(/^https?:\/\//, '');
+}
+
+function syncTaskTypeUi() {
+  const t = $('taskType').value;
+  $('fileBlock').hidden = t === 'text2music';
+}
+
+async function saveConnSettings() {
+  const params = collectParams();
+  const res = await call('save_settings', {
+    base_host: params.base_host,
+    base_url: params.base_url,
+    api_key: params.api_key,
+    transport: params.transport,
+    proxy_url: params.proxy_url,
+  });
+  if (res.ok) {
+    log('Настройки подключения сохранены', 'ok');
+    updateBaseLabel();
+  } else {
+    log('Не удалось сохранить настройки: ' + res.error, 'err');
+  }
+  return res;
+}
+
+/* ---------------- квота ---------------- */
+
+function renderQuota(res) {
+  const day = $('quotaDay');
+  const month = $('quotaMonth');
+  const queue = $('queuePill');
+
+  const fill = (el, block, label) => {
+    const val = el.querySelector('.quota-val');
+    if (!block) {
+      val.textContent = '—';
+      val.className = 'quota-val';
+      el.title = `${label}: нет данных`;
+      return;
+    }
+    const { used, limit, remaining, reset_at: resetAt } = block;
+    const left = remaining !== null && remaining !== undefined ? remaining : (limit != null && used != null ? limit - used : null);
+    if (limit != null) {
+      val.textContent = `${used ?? '—'} / ${limit} · ост. ${left ?? '—'}`;
+    } else if (left !== null) {
+      val.textContent = `осталось ${left}`;
+    } else {
+      val.textContent = JSON.stringify(block);
+    }
+    val.className = 'quota-val' + (left === 0 ? ' empty' : (left !== null && limit && left / limit < 0.2 ? ' low' : ''));
+    el.title = resetAt ? `Сброс: ${resetAt}` : label;
+    if (resetAt) {
+      val.textContent += ` · сброс ${String(resetAt).replace('T', ' ').replace('+00:00', ' UTC')}`;
+    }
+  };
+
+  if (res.ok) {
+    $('corsNote').hidden = true;
+    fill(day, res.quota && res.quota.day, 'День');
+    fill(month, res.quota && res.quota.month, 'Месяц');
+    const q = res.queue;
+    if (q && typeof q === 'object') {
+      const depth = q.queue_size ?? q.depth ?? q.queue ?? q.queued ?? q.active ?? null;
+      if (depth !== null) {
+        queue.hidden = false;
+        queue.querySelector('.quota-val').textContent = String(depth);
+        const parts = [];
+        if (q.running !== undefined) parts.push(`в работе: ${q.running}`);
+        if (q.avg_job_seconds !== undefined && q.avg_job_seconds !== null) {
+          parts.push(`среднее время: ${Number(q.avg_job_seconds).toFixed(1)} с`);
+        }
+        queue.title = parts.join(' · ') || 'Очередь';
+      } else {
+        queue.hidden = true;
+      }
+    } else {
+      queue.hidden = true;
+    }
+    const tier = res.quota && res.quota.tier ? ` · ${res.quota.tier}` : '';
+    const wallet = res.quota && res.quota.wallet ? ' · кошелёк' : '';
+    $('connBadge').textContent = `ключ принят${tier}${wallet}`;
+    $('connBadge').className = 'badge ok';
+  } else {
+    $('connBadge').textContent = res.status ? `ошибка ${res.status}` : 'ошибка';
+    $('connBadge').className = 'badge err';
+    day.querySelector('.quota-val').textContent = 'н/д';
+    month.querySelector('.quota-val').textContent = 'н/д';
+    if (res.kind === 'cors') {
+      $('corsNote').hidden = false;
+      $('transportBlock').open = true;
+    }
+  }
+}
+
+async function refreshQuota(quiet = false) {
+  try {
+    const res = await call('get_quota');
+    renderQuota(res);
+    if (!quiet) {
+      if (res.ok) {
+        const d = res.quota && res.quota.day;
+        log(`Квота: день ${d ? `${d.used ?? '—'}/${d.limit ?? '—'}` : 'н/д'}`, 'ok');
+        if (res.base_url) log(`Адрес API: ${res.base_url}`);
+      } else {
+        log('Квота: ' + res.error, res.status === 401 ? 'warn' : 'err');
+      }
+    }
+    return res;
+  } catch (e) {
+    if (!quiet) log('Квота: ' + e.message, 'err');
+    return { ok: false, error: e.message };
+  }
+}
+
+/* ---------------- генерация ---------------- */
+
+async function generate() {
+  if (state.busy) return;
+
+  const params = collectParams();
+  const hasBody = params.prompt.trim() || params.lyrics.trim() ||
+    (params.sample_mode && params.sample_query.trim());
+  if (!hasBody) {
+    log('Заполните описание (prompt), текст песни или фразу для черновика', 'warn');
+    setStatus('Пустой запрос: API ответит 400', 'err');
+    return;
+  }
+  if (params.sample_mode && !params.sample_query.trim()) {
+    log('Включён режим черновика — нужна фраза sample_query', 'warn');
+    return;
+  }
+  if (!params.api_key) {
+    log('Введите API-ключ в блоке «Подключение»', 'warn');
+    setStatus('Нет API-ключа', 'err');
+    return;
+  }
+  if (params.task_type !== 'text2music' && !state.trackFiles.src_audio) {
+    log(`Режиму ${params.task_type} нужен файл src_audio — выберите его в блоке ниже`, 'warn');
+    setStatus('Нужен файл src_audio', 'err');
+    return;
+  }
+
+  state.busy = true;
+  $('btnGenerate').disabled = true;
+  setStatus('Отправка задачи…', 'run');
+  setProgress(5);
+  log(`Генерация: ${params.task_type}, ${params.audio_duration} с, ${params.audio_format}, вариантов: ${params.batch_size}`);
+
+  try {
+    await call('save_settings', params);
+    const res = await call('generate', params);
+    if (!res.ok) {
+      setStatus(res.error || 'Ошибка запроса', 'err');
+      log('Ошибка генерации: ' + res.error, 'err');
+      if (res.kind === 'cors') {
+        $('corsNote').hidden = false;
+        $('transportBlock').open = true;
+      }
+      if (res.status === 429) log('Квота исчерпана — смотрите блок «Квота» сверху', 'warn');
+      if (res.status === 402) log('Кошелёк пуст — пополните баланс в кабинете', 'warn');
+      state.busy = false;
+      $('btnGenerate').disabled = false;
+      setProgress(0);
+      return;
+    }
+
+    state.taskId = res.task_id;
+    $('taskIdLine').hidden = false;
+    $('taskIdLine').textContent = `task_id: ${res.task_id} · status: ${res.status || 'queued'}`;
+    log(`Задача создана: ${res.task_id}`, 'ok');
+    startClock();
+    setProgress(15);
+    setStatus('В очереди…', 'run');
+    startPolling();
+  } catch (e) {
+    setStatus(e.message, 'err');
+    log('Сбой: ' + e.message, 'err');
+    state.busy = false;
+    $('btnGenerate').disabled = false;
+    setProgress(0);
+  }
+}
+
+function startClock() {
+  stopClock();
+  state.startedAt = Date.now();
+  $('elapsed').textContent = '00:00';
+  state.clockTimer = setInterval(() => {
+    $('elapsed').textContent = fmtDuration(Math.floor((Date.now() - state.startedAt) / 1000));
+  }, 1000);
+}
+
+function stopClock() {
+  if (state.clockTimer) clearInterval(state.clockTimer);
+  state.clockTimer = null;
+}
+
+function startPolling() {
+  stopPolling();
+  state.pollTimer = setInterval(pollOnce, 2000);
+  pollOnce();
+}
+
+function stopPolling() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
+}
+
+async function pollOnce() {
+  if (!state.taskId) return;
+  let res;
+  try {
+    res = await call('get_task', state.taskId);
+  } catch (e) {
+    log('Опрос: ' + e.message, 'err');
+    return;
+  }
+  if (!res.ok) {
+    if (res.status === 404) {
+      stopPolling();
+      finishError('Задача не найдена (404): ' + res.error);
+    }
+    return;
+  }
+
+  const task = res.task || {};
+  const status = String(task.status || '').toLowerCase();
+  $('taskIdLine').textContent = `task_id: ${state.taskId} · status: ${status || '—'}`;
+
+  if (status === 'queued') {
+    setProgress(25);
+    setStatus('В очереди…', 'run');
+  } else if (status === 'running' || status === 'processing') {
+    setProgress(55);
+    setStatus('Генерация…', 'run');
+  } else if (status === 'succeeded' || status === 'completed') {
+    stopPolling();
+    setProgress(100);
+    await onSucceeded(task);
+  } else if (status === 'failed' || status === 'error' || status === 'cancelled') {
+    stopPolling();
+    const message = task.error || task.message || task.detail || 'генерация не удалась';
+    finishError(String(message));
+  }
+}
+
+function finishError(message) {
+  setStatus(message, 'err');
+  log('Задача упала: ' + message, 'err');
+  stopClock();
+  state.busy = false;
+  $('btnGenerate').disabled = false;
+  setProgress(0);
+  refreshQuota(true);
+}
+
+async function onSucceeded(task) {
+  stopClock();
+  const elapsed = fmtDuration(Math.floor((Date.now() - state.startedAt) / 1000));
+  setStatus(`Готово за ${elapsed}`, 'ok');
+  log('Задача выполнена', 'ok');
+
+  const tracks = Array.isArray(task.tracks) ? task.tracks : [];
+  state.tracks = tracks;
+  // новые треки добавляются под предыдущими — как в оригинальном клиенте
+  $('tracksEmpty').hidden = tracks.length > 0 || $('tracks').querySelector('.track') !== null;
+  $('btnSaveAll').hidden = tracks.length < 2;
+
+  for (let i = 0; i < tracks.length; i += 1) {
+    await renderTrack(i, tracks[i]);
+  }
+
+  state.busy = false;
+  $('btnGenerate').disabled = false;
+  refreshQuota(true);
+}
+
+async function renderTrack(index, meta) {
+  const box = $('tracks');
+  const card = document.createElement('div');
+  card.className = 'track';
+  card.innerHTML = `
+    <div class="track-head">
+      <div class="track-title">Трек #${index + 1}</div>
+      <div class="track-actions">
+        <button class="btn primary" data-act="save">Сохранить на диск</button>
+        <button class="btn ghost" data-act="url">Скопировать ссылку</button>
+        <button class="btn ghost" data-act="text">Текст / мета</button>
+      </div>
+    </div>
+    <audio controls preload="metadata"></audio>
+    <div class="track-meta"></div>
+    <div class="track-text" hidden></div>
+  `;
+  box.appendChild(card);
+
+  const metaBox = card.querySelector('.track-meta');
+  const chips = [];
+  if (meta && meta.seed !== undefined && meta.seed !== null) chips.push(`seed <b>${esc(meta.seed)}</b>`);
+  const m = meta && meta.metas ? meta.metas : null;
+  if (m) {
+    const map = [
+      ['duration', 'длит.'],
+      ['tempo', 'темп'],
+      ['bpm', 'bpm'],
+      ['key', 'тональность'],
+      ['key_scale', 'тональность'],
+      ['keyscale', 'тональность'],
+      ['time_signature', 'размер'],
+      ['timesignature', 'размер'],
+      ['genre', 'жанр'],
+      ['genres', 'жанр'],
+    ];
+    const known = map.map(([k]) => k);
+    for (const [k, label] of map) {
+      if (m[k] !== undefined && m[k] !== null && m[k] !== 'N/A') chips.push(`${label} <b>${esc(m[k])}</b>`);
+    }
+    // остальные мелкие мета; prompt/lyrics показываем отдельным блоком
+    Object.keys(m).forEach((k) => {
+      if (known.includes(k) || k === 'prompt' || k === 'lyrics') return;
+      const v = m[k];
+      if (v === null || v === undefined || v === '' || v === 'N/A') return;
+      const text = String(v);
+      if (text.length > 60) return;
+      chips.push(`${esc(k)} <b>${esc(v)}</b>`);
+    });
+  }
+  if (meta && meta.url) chips.push('ссылка получена');
+  metaBox.innerHTML = chips.map((c) => `<span class="chip">${c}</span>`).join('') || '<span class="chip">мета нет</span>';
+
+  const textBox = card.querySelector('.track-text');
+  textBox.textContent =
+    `prompt: ${meta && meta.prompt ? meta.prompt : '—'}\n\n` +
+    `lyrics:\n${meta && meta.lyrics ? meta.lyrics : '—'}\n\n` +
+    `meta: ${m ? JSON.stringify(m, null, 2) : '—'}`;
+
+  // плеер
+  const audio = card.querySelector('audio');
+  const got = await call('get_track', state.taskId, index);
+  if (got.ok) {
+    audio.src = got.url;
+    log(`Трек #${index + 1}: ${(got.size / 1024 / 1024).toFixed(2)} МБ (${got.mime})`, 'ok');
+  } else {
+    log(`Не удалось скачать трек #${index + 1}: ${got.error}`, 'err');
+    if (meta && meta.url) {
+      audio.src = meta.url;
+      log('Плеер переведён на прямую ссылку трека', 'warn');
+    }
+  }
+
+  card.querySelector('[data-act="save"]').addEventListener('click', () => saveTrack(index));
+  card.querySelector('[data-act="url"]').addEventListener('click', async () => {
+    const url = (meta && meta.url) || '';
+    if (!url) { log('У трека нет внешней ссылки', 'warn'); return; }
+    try {
+      await navigator.clipboard.writeText(url);
+      log('Ссылка скопирована: ' + url, 'ok');
+    } catch (e) {
+      log('Ссылка: ' + url);
+    }
+  });
+  card.querySelector('[data-act="text"]').addEventListener('click', () => {
+    textBox.hidden = !textBox.hidden;
+  });
+}
+
+async function saveTrack(index) {
+  const ext = $('audioFormat').value || 'mp3';
+  const res = await call('save_track', state.taskId, index, suggestName(index, ext));
+  if (res.ok) {
+    log(`Сохранено: ${res.path} (${(res.size / 1024 / 1024).toFixed(2)} МБ) — папка загрузок браузера`, 'ok');
+    setStatus('Файл сохранён (загрузки браузера)', 'ok');
+  } else if (res.cancelled) {
+    log('Сохранение отменено', 'warn');
+  } else {
+    log('Не сохранено: ' + res.error, 'err');
+  }
+}
+
+/* ---------------- черновик и доработка ---------------- */
+
+function pickField(targetPrompt, targetLyrics, payloadRaw) {
+  // живой ответ /music/sample кладёт поля в блок data, а описание называет caption
+  const payload = payloadRaw && payloadRaw.data && typeof payloadRaw.data === 'object'
+    ? payloadRaw.data : (payloadRaw || {});
+  const p = payload.prompt || payload.caption || payload.style || payload.description || '';
+  const l = payload.lyrics || payload.text || payload.words || '';
+  if (p) targetPrompt.value = p;
+  if (l) targetLyrics.value = l;
+  return Boolean(p || l);
+}
+
+async function sampleDraft() {
+  const query = $('sampleQuery').value.trim() || $('prompt').value.trim();
+  if (!query) {
+    log('Введите фразу для черновика (или описание в prompt)', 'warn');
+    return;
+  }
+  setStatus('Готовлю черновик…', 'run');
+  log('Запрашиваю бесплатный черновик /music/sample');
+  try {
+    const res = await call('sample_draft', {
+      query,
+      instrumental: /\[instrumental\]/i.test($('lyrics').value),
+      vocal_language: $('vocalLanguage').value,
+      random: false,
+    });
+    if (!res.ok) {
+      setStatus('Черновик не получился: ' + res.error, 'err');
+      log('sample: ' + res.error, 'err');
+      if (res.kind === 'cors') { $('corsNote').hidden = false; $('transportBlock').open = true; }
+      return;
+    }
+    const payload = res.result || {};
+    const filled = pickField($('prompt'), $('lyrics'), payload);
+    if (filled) {
+      $('sampleMode').checked = true;
+      $('sampleQuery').value = query;
+      setStatus('Черновик подставлен в форму', 'ok');
+      log('Черновик готов — проверьте prompt/lyrics и нажмите «Сгенерировать»', 'ok');
+      saveSoon();
+    } else {
+      setStatus('Ответ /music/sample', 'ok');
+      log('sample → ' + JSON.stringify(payload).slice(0, 1500));
+    }
+  } catch (e) {
+    setStatus(e.message, 'err');
+    log(e.message, 'err');
+  }
+}
+
+async function formatDraft() {
+  const prompt = $('prompt').value.trim();
+  const lyrics = $('lyrics').value.trim();
+  if (!prompt && !lyrics) {
+    log('Заполните описание или текст — /music/format их допишет', 'warn');
+    return;
+  }
+  setStatus('Дописываю…', 'run');
+  log('Запрашиваю бесплатную доработку /music/format');
+  try {
+    const res = await call('format_draft', { prompt, lyrics });
+    if (!res.ok) {
+      setStatus('Не получилось: ' + res.error, 'err');
+      log('format: ' + res.error, 'err');
+      if (res.kind === 'cors') { $('corsNote').hidden = false; $('transportBlock').open = true; }
+      return;
+    }
+    const payload = res.result || {};
+    const filled = pickField($('prompt'), $('lyrics'), payload);
+    if (filled) {
+      setStatus('Описание и текст обновлены', 'ok');
+      log('format применён к форме', 'ok');
+      saveSoon();
+    } else {
+      setStatus('Ответ /music/format', 'ok');
+      log('format → ' + JSON.stringify(payload).slice(0, 1500));
+    }
+  } catch (e) {
+    setStatus(e.message, 'err');
+    log(e.message, 'err');
+  }
+}
+
+/* ---------------- файлы ---------------- */
+
+function pickFile(which) {
+  const input = which === 'src' ? $('srcFileInput') : $('refFileInput');
+  input.value = '';
+  input.click();
+}
+
+function onFileChosen(which, event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  const totalOther = which === 'src'
+    ? (state.trackFiles.reference_audio ? state.trackFiles.reference_audio.size : 0)
+    : (state.trackFiles.src_audio ? state.trackFiles.src_audio.size : 0);
+  if (file.size + totalOther > MAX_UPLOAD_BYTES) {
+    log('Файлы больше 25 МБ (суммарно по src_audio и reference_audio)', 'err');
+    return;
+  }
+  const params = {};
+  if (which === 'src') {
+    state.trackFiles.src_audio = file;
+    params.src_audio = file.name;
+    $('srcAudioName').value = file.name;
+    log(`src_audio: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} МБ)`, 'ok');
+  } else {
+    state.trackFiles.reference_audio = file;
+    params.reference_audio = file.name;
+    $('refAudioName').value = file.name;
+    log(`reference_audio: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} МБ)`, 'ok');
+  }
+  call('save_settings', params);
+}
+
+function clearFile(which) {
+  const params = {};
+  if (which === 'src') {
+    state.trackFiles.src_audio = null;
+    params.src_audio = '';
+    $('srcAudioName').value = '';
+  } else {
+    state.trackFiles.reference_audio = null;
+    params.reference_audio = '';
+    $('refAudioName').value = '';
+  }
+  call('save_settings', params);
+}
+
+/* ---------------- лаунчер Chrome/Edge (обход CORS без прокси) ---------------- */
+
+function buildLauncherBat() {
+  const embedded = location.href.split('#')[0];
+  return [
+    '@echo off',
+    'rem NeuralDeep Music - open the app in Chrome/Edge with CORS checks disabled.',
+    'rem Uses an isolated browser profile; your normal browser profile is not touched.',
+    'rem Keep this .bat in the same folder as neuraldeep-music.html (relative path),',
+    'rem otherwise it falls back to the absolute URL it was generated from.',
+    'set "LOCALPAGE=file:///%~dp0neuraldeep-music.html"',
+    'set "LOCALPAGE=%LOCALPAGE:\\=/%"',
+    'set "PAGE=' + embedded + '"',
+    'if exist "%~dp0neuraldeep-music.html" set "PAGE=%LOCALPAGE%"',
+    'set "PROFILE=%LOCALAPPDATA%\\NeuralDeepMusic\\browser-profile"',
+    'for %%P in (',
+    '  "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
+    '  "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
+    '  "%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe"',
+    '  "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
+    '  "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
+    ') do (',
+    '  if exist "%%~P" (',
+    '    start "" "%%~P" --disable-web-security --disable-site-isolation-trials --user-data-dir="%PROFILE%" --no-first-run --no-default-browser-check "%PAGE%"',
+    '    exit /b 0',
+    '  )',
+    ')',
+    'echo Chrome or Edge not found. Install Google Chrome or use the CORS proxy option.',
+    'pause',
+  ].join('\r\n');
+}
+
+function downloadLauncher() {
+  const blob = new Blob([buildLauncherBat()], { type: 'application/x-bat' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'start-neuraldeep-music.bat';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  log('Лаунчер скачан: положите его рядом с neuraldeep-music.html и запустите. ' +
+      'Если Windows заблокировал файл — правый клик → Свойства → ✓ Разблокировать', 'ok');
+}
+
+async function copyLauncher() {
+  try {
+    await navigator.clipboard.writeText(buildLauncherBat());
+    log('Текст лаунчера скопирован: вставьте его в Блокнот и сохраните как start-neuraldeep-music.bat ' +
+        '(рядом с neuraldeep-music.html). Такой файл Windows не блокирует', 'ok');
+  } catch (e) {
+    log('Не удалось скопировать автоматически — скачайте .bat кнопкой слева', 'warn');
+  }
+}
+
+/* ---------------- инициализация ---------------- */
+
+function bind() {
+  $('btnGenerate').addEventListener('click', generate);
+  $('btnRefreshQuota').addEventListener('click', () => refreshQuota(false));
+  $('btnCheckConn').addEventListener('click', async () => {
+    await saveConnSettings();
+    resetDirectFailure(); // новая проверка — даём прямому транспорту ещё шанс
+    const res = await refreshQuota(false);
+    if (res.ok) setStatus('Ключ работает', 'ok');
+  });
+  $('btnSaveConn').addEventListener('click', saveConnSettings);
+  $('btnToggleKey').addEventListener('click', () => {
+    const f = $('apiKey');
+    f.type = f.type === 'password' ? 'text' : 'password';
+  });
+  $('btnSample').addEventListener('click', sampleDraft);
+  $('btnFormat').addEventListener('click', formatDraft);
+  $('btnClearLog').addEventListener('click', () => { $('log').innerHTML = ''; });
+  $('btnPickSrc').addEventListener('click', () => pickFile('src'));
+  $('btnPickRef').addEventListener('click', () => pickFile('ref'));
+  $('btnClearSrc').addEventListener('click', () => clearFile('src'));
+  $('btnClearRef').addEventListener('click', () => clearFile('ref'));
+  $('srcFileInput').addEventListener('change', (e) => onFileChosen('src', e));
+  $('refFileInput').addEventListener('change', (e) => onFileChosen('ref', e));
+  $('btnSaveAll').addEventListener('click', async () => {
+    for (let i = 0; i < state.tracks.length; i += 1) await saveTrack(i);
+  });
+  $('btnCopyWorker').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('workerCode').textContent);
+      log('Код воркера скопирован в буфер обмена', 'ok');
+    } catch (e) {
+      log('Скопируйте код воркера вручную (выделите и Ctrl+C)', 'warn');
+    }
+  });
+  $('btnDownloadLauncher').addEventListener('click', downloadLauncher);
+  $('btnCopyLauncher').addEventListener('click', copyLauncher);
+
+  $('audioDuration').addEventListener('input', () => {
+    $('durationVal').textContent = $('audioDuration').value;
+  });
+  $('taskType').addEventListener('change', syncTaskTypeUi);
+  $('baseHost').addEventListener('change', () => {
+    const v = $('baseHost').value;
+    if (v !== 'custom') {
+      $('baseUrl').value = `https://api.${v}/v1`;
+      updateBaseLabel();
+    }
+    $('baseUrl').focus();
+  });
+  $('baseUrl').addEventListener('change', updateBaseLabel);
+  $('transport').addEventListener('change', resetDirectFailure);
+
+  // автосохранение формы при изменениях
+  document.querySelectorAll('input, select, textarea').forEach((el) => {
+    el.addEventListener('change', saveSoon);
+    if (el.tagName === 'TEXTAREA' || el.type === 'text' || el.type === 'password') {
+      el.addEventListener('input', saveSoon);
+    }
+  });
+
+  $('apiKey').addEventListener('change', () => refreshQuota(true));
+}
+
+const saveSoon = debounce(async () => {
+  const params = collectParams();
+  await call('save_settings', params);
+}, 700);
+
+function debounce(fn, ms) {
+  let t = null;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  bind();
+  log('Клиент запущен (одиночный HTML)');
+  try {
+    const res = await call('get_settings');
+    if (res.ok) {
+      applySettings(res.settings);
+      if (res.settings.src_audio) {
+        $('srcAudioName').value = res.settings.src_audio.split(/[\\/]/).pop() + ' (нужно выбрать заново)';
+        $('srcAudioName').title = 'После перезагрузки страницы файл нужно выбрать заново';
+      }
+      if (res.settings.reference_audio) {
+        $('refAudioName').value = res.settings.reference_audio.split(/[\\/]/).pop() + ' (нужно выбрать заново)';
+        $('refAudioName').title = 'После перезагрузки страницы файл нужно выбрать заново';
+      }
+    }
+  } catch (e) {
+    log('Настройки: ' + e.message, 'err');
+  }
+  refreshQuota(true);
+});
+</script>
+</body>
+</html>
